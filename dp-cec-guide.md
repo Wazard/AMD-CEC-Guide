@@ -271,14 +271,12 @@ Scheduled runs write to `C:\cec\dpcec.log`. Each entry starts with a timestamp a
 
 ## 6. Sign in automatically
 
-Open a terminal **as administrator**. Run `net user` to see the exact account name, then run these, replacing `Guest` with that name:
+Open a terminal **as administrator** and type `cmd` first. These commands are for Command Prompt: in PowerShell they fail with "Invalid key name", and PowerShell can drop the empty `""` password. Run `net user` to see the exact account name, then run these, replacing `Guest` with that name:
 
 ```bat
-set "WL=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-reg add "%WL%" /v AutoAdminLogon    /t REG_SZ /d 1 /f
-reg add "%WL%" /v DefaultUserName   /t REG_SZ /d "Guest" /f
-reg add "%WL%" /v DefaultPassword   /t REG_SZ /d "" /f
-reg add "%WL%" /v DefaultDomainName /t REG_SZ /d "%COMPUTERNAME%" /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 1 /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUserName /t REG_SZ /d "Guest" /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /t REG_SZ /d "" /f
 ```
 
 Include the empty `DefaultPassword`, even though the account has no password: auto sign-in may not work without it.
@@ -302,6 +300,22 @@ Playnite comes with a separate program just for fullscreen mode, `Playnite.Fulls
    ```
    That's the default install location. If you installed Playnite elsewhere, right-click your Playnite shortcut → **Open file location** and use the `Playnite.FullscreenApp.exe` in that folder.
 3. In Playnite's settings, turn off its own "start with Windows" option if it's on. Otherwise desktop mode might open alongside fullscreen.
+
+## 7b. Turn off UAC prompts
+
+Press **Win + R**, type `UserAccountControlSettings`, drag the slider to the bottom (**Never notify**) and click OK. Or, in an admin `cmd`:
+
+```bat
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v ConsentPromptBehaviorAdmin /t REG_DWORD /d 0 /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v PromptOnSecureDesktop /t REG_DWORD /d 0 /f
+```
+
+- Programs can then make admin-level changes without asking. That's the trade-off for no pop-ups on the TV.
+- On an **administrator** account, admin requests are approved silently. On a **standard** account, they're refused silently, so emulators that need admin won't start elevated.
+- **Emulators need admin, so the auto sign-in account must be an administrator:** Settings → Accounts → Other users → the account → **Change account type → Administrator**, then sign out and back in. Emulators set to "Run this program as an administrator" then start elevated with no prompt.
+- With auto sign-in, no password and no UAC prompts, anything that runs on this PC has full control of it. Keep it a dedicated couch PC.
+- Avoid turning UAC off completely (`EnableLUA = 0`): on Windows 10/11 it stops Microsoft Store apps from opening.
+- To undo: move the slider back to the default (third notch).
 
 ## 8. Check the TV tasks
 
