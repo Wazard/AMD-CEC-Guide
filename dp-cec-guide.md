@@ -1,8 +1,13 @@
-# HDMI-CEC TV on/off from an AMD GPU on Windows through a DP→HDMI adapter
+# TV gaming PC setup: HDMI-CEC on/off, auto sign-in, Playnite fullscreen
 
-Turn the TV on at logon/wake and put it in standby at sleep/shutdown, from a Windows PC whose TV is connected through a DisplayPort→HDMI adapter.
+A Windows PC connected to the TV through a DisplayPort→HDMI adapter:
 
-> **Status:** `on` and `standby` both reach the TV on Windows (`OK: TV acknowledged`). The sleep listener (`watch`) and the shutdown task are not tested yet.
+- **Part 1:** turns the TV on at logon/wake and puts it in standby at sleep/shutdown (HDMI-CEC).
+- **Part 2:** signs in automatically and opens Playnite in fullscreen mode.
+
+> **Status:** TV on at wake and off at sleep both work. Shutdown is not tested yet. Part 2 is not tested yet.
+
+# Part 1: HDMI-CEC TV on/off
 
 ---
 
@@ -262,12 +267,61 @@ Scheduled runs write to `C:\cec\dpcec.log`. Each entry starts with a timestamp a
 
 ---
 
+# Part 2: Auto sign-in and Playnite fullscreen
+
+## 6. Sign in automatically
+
+Open a terminal **as administrator**. Run `net user` to see the exact account name, then run these, replacing `Guest` with that name:
+
+```bat
+set "WL=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+reg add "%WL%" /v AutoAdminLogon    /t REG_SZ /d 1 /f
+reg add "%WL%" /v DefaultUserName   /t REG_SZ /d "Guest" /f
+reg add "%WL%" /v DefaultPassword   /t REG_SZ /d "" /f
+reg add "%WL%" /v DefaultDomainName /t REG_SZ /d "%COMPUTERNAME%" /f
+```
+
+Include the empty `DefaultPassword`, even though the account has no password: auto sign-in may not work without it.
+
+So waking from sleep doesn't stop at the lock screen either, go to **Settings → Accounts → Sign-in options → "If you've been away, when should Windows require you to sign in again?"** and set it to **Never**.
+
+To undo auto sign-in later:
+
+```bat
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 0 /f
+```
+
+## 7. Start Playnite in fullscreen
+
+Playnite comes with a separate program just for fullscreen mode, `Playnite.FullscreenApp.exe`. Put a shortcut to it in the Startup folder. **Do this while signed in to the account that signs in automatically**, because both the Startup folder and a default Playnite install belong to one account.
+
+1. Press **Win + R**, type `shell:startup`, and press Enter.
+2. Right-click → **New → Shortcut**, and enter this as the location:
+   ```
+   %LOCALAPPDATA%\Playnite\Playnite.FullscreenApp.exe
+   ```
+   That's the default install location. If you installed Playnite elsewhere, right-click your Playnite shortcut → **Open file location** and use the `Playnite.FullscreenApp.exe` in that folder.
+3. In Playnite's settings, turn off its own "start with Windows" option if it's on. Otherwise desktop mode might open alongside fullscreen.
+
+## 8. Check the TV tasks
+
+The CEC tasks from step 5 run under the account that was signed in when `install-tasks.bat` was run. If that's the account that now signs in automatically, nothing changes. If it's a different one, the TV on/off tasks won't run for that account as they are now.
+
+## 9. Test
+
+Restart the PC. It should go straight to the desktop, open Playnite fullscreen, and turn on the TV.
+
+---
+
 ## Status / next steps
 
 - [x] Install Python and gpu-aux
 - [x] `list` / `probe`: capability `0x07`
 - [x] `standby` and `on` reach the TV (`OK: TV acknowledged`)
-- [ ] Run the new `install-tasks.bat` as administrator
-- [ ] Sleep: TV turns off before the PC sleeps (`sleep -> standby` in the log)
-- [ ] Wake: TV turns on
+- [x] Run the new `install-tasks.bat` as administrator
+- [x] Sleep: TV turns off before the PC sleeps
+- [x] Wake: TV turns on
 - [ ] Shutdown: TV turns off
+- [ ] Auto sign-in works after a restart
+- [ ] Playnite opens in fullscreen at sign-in
+- [ ] TV tasks run under the auto sign-in account
