@@ -1,0 +1,22 @@
+@echo off
+rem Run as administrator. Set PORT to the --port number from "dpcec.py list".
+set PORT=0
+set "PY="
+for /f "delims=" %%i in ('where pythonw') do if not defined PY set "PY=%%i"
+if not defined PY (echo pythonw.exe not found & pause & exit /b 1)
+set "ON=\"%PY%\" C:\cec\dpcec.py on --port %PORT%"
+set "OFF=\"%PY%\" C:\cec\dpcec.py standby --port %PORT%"
+set "WATCH=\"%PY%\" C:\cec\dpcec.py watch --port %PORT%"
+
+rem Old sleep task ran at wake instead of at sleep - remove it
+schtasks /Delete /F /TN "CEC\TV off at sleep" >nul 2>&1
+
+schtasks /Create /F /TN "CEC\TV on at logon"     /SC ONLOGON /TR "%ON%"
+schtasks /Create /F /TN "CEC\TV on at wake"      /SC ONEVENT /EC System /MO "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]" /TR "%ON%"
+schtasks /Create /F /TN "CEC\TV off at shutdown" /SC ONEVENT /EC System /MO "*[System[Provider[@Name='User32'] and EventID=1074]]" /TR "%OFF%"
+schtasks /Create /F /TN "CEC\TV sleep watcher"   /SC ONLOGON /TR "%WATCH%"
+rem Scheduled tasks are killed after 3 days by default; the watcher must run forever
+powershell -NoProfile -Command "Set-ScheduledTask -TaskPath '\CEC\' -TaskName 'TV sleep watcher' -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero))"
+schtasks /Run /TN "CEC\TV sleep watcher"
+echo Done.
+pause

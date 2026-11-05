@@ -1,8 +1,8 @@
-# HDMI-CEC from an AMD GPU on Windows through a DP→HDMI adapter
+# HDMI-CEC TV on/off from an AMD GPU on Windows through a DP→HDMI adapter
 
 Turn the TV on at logon/wake and put it in standby at sleep/shutdown, from a Windows PC whose TV is connected through a DisplayPort→HDMI adapter.
 
-> **Status:** not yet tested on Windows. CEC through this adapter is confirmed working on Bazzite (Linux).
+> **Status:** `on` and `standby` both reach the TV on Windows (`OK: TV acknowledged`). The sleep listener (`watch`) and the shutdown task are not tested yet.
 
 ---
 
@@ -20,34 +20,30 @@ Turn the TV on at logon/wake and put it in standby at sleep/shutdown, from a Win
 ## Background: why this works
 
 - AMD's Windows driver does not support HDMI-CEC, and DisplayPort has no CEC wire.
-- CEC worked on Bazzite (Linux), which shows the UGREEN adapter supports **DisplayPort 1.3 "CEC tunneling over AUX"**. Linux's `amdgpu` driver exposes this; Windows doesn't.
-- The workaround: drive the adapter's CEC registers (**DPCD 0x3000–0x30FF**) directly over the DP AUX channel from user space.
-- AMD's AUX function (`ADL_Display_NativeAUXChannel_Access` in `atiadlxx.dll`) is officially NDA-only, but the open-source Python library **gpu_aux** (<https://github.com/cnbright/gpu_aux>, `pip install gpu-aux`) has reverse-engineered it and provides `read_dpcd` / `write_dpcd` / `i2c_read` / `i2c_write` for AMD.
+- The UGREEN adapter supports **DisplayPort 1.3 "CEC tunneling over AUX"**. CEC worked through it on Bazzite (Linux), whose `amdgpu` driver supports this. On Windows, `probe` reports capability `0x07`: tunneling, snooping and multiple logical addresses.
+- The script drives the adapter's CEC registers (**DPCD 0x3000–0x30FF**) directly over the DP AUX channel.
+- It uses the open-source Python library **gpu_aux** (<https://github.com/cnbright/gpu_aux>, `pip install gpu-aux`), which calls AMD's private `ADL_Display_NativeAUXChannel_Access` in `atiadlxx.dll`.
 
 ### What the script does
 
-1. Checks the tunneling capability register (`0x3000`).
+1. Reads the tunneling capability register (`0x3000`).
 2. Enables CEC tunneling (`0x3001`).
-3. Sends as Playback Device 1 (logical address 4). The logical address mask (`0x300E`) is not set, see Caveat.
-4. Writes the CEC frame to the TX buffer (`0x3020`).
-5. Triggers transmission via `0x3003`.
-6. Polls the IRQ flags (`0x3004`) for success or error.
-
-Messages sent:
+3. Writes the CEC frame to the TX buffer (`0x3020`), triggers transmission via `0x3003`, and polls the IRQ flags (`0x3004`).
 
 | Command | CEC message | Frame |
 |---|---|---|
 | `on` | Image View On (to TV) | `40 04` |
-| `on --pa XXXX` | + Active Source (broadcast) | `4F 82 XX XX` |
 | `standby` | Standby (to TV) | `40 36` |
 
-It can also read the TV's HDMI physical address from the EDID (`pa` command).
+It sends as Playback Device 1 (logical address 4).
 
-### Caveat
+### Quirks found on this setup
 
-The ADL AUX interface is private and undocumented. An Adrenalin driver update could break it.
-
-On this setup ADL accepts 1-byte DPCD writes but fails multi-byte ones with `ADL error -1`, so the script writes every register one byte at a time (`wr()` helper). Writing the logical-address mask (`0x300E`/`0x300F`) also fails with `ADL error -1`, so the script doesn't set it. It's only needed to receive messages *from* the TV, not to send on/standby.
+- **Multi-byte AUX writes fail** with `ADL error -1`, but 1-byte writes work. The script writes every register one byte at a time (`wr()` helper).
+- **The logical address mask (`0x300E`/`0x300F`) can't be written** (`ADL error -1`). The script skips it. The mask is only needed to receive messages *from* the TV, not to send on/standby.
+- **Video can drop after `standby`.** Run manually, the TV showed "no signal" instead of turning off. Unplugging and replugging the adapter brought the picture back.
+- **Windows "entering sleep" task triggers fire too late.** A task triggered by Kernel-Power event 42 only ran *after* the PC woke up. That turned the TV off at wake, and the `on` sent right after was ignored while the TV was shutting down. That's why sleep is handled by the `watch` listener instead.
+- The ADL AUX interface is private and undocumented. An Adrenalin driver update could break it.
 
 ---
 
@@ -69,21 +65,24 @@ pip install gpu-aux
 
 Create the folder `C:\cec` and save this as `C:\cec\dpcec.py`.
 
-Commands: `list` | `probe` | `pa` | `on` | `standby` (options: `--gpu N`, `--port N`, `--pa XXXX`)
+Commands: `list` | `probe` | `on` | `standby` | `watch` (options: `--gpu N`, `--port N`)
 
 ```python
-# dpcec.py - HDMI-CEC through a DP->HDMI adapter (AMD GPU, Windows)
-# Commands: list | probe | pa | on | standby   (add --port N, --pa XXXX)
-import argparse, sys, time
+# dpcec.py - HDMI-CEC TV on/off through a DP->HDMI adapter (AMD GPU, Windows)
+# Commands: list | probe | on | standby | watch   (add --port N)
+import argparse, ctypes, sys, time
 from gpu_aux import AuxPort, AuxError, enumerate_gpus, enumerate_ports
 
-if sys.stdout is None:
-    sys.stdout = sys.stderr = open(r"C:\cec\dpcec.log", "a")
+if sys.stdout is None:  # pythonw (scheduled tasks): log to file, line-buffered
+    sys.stdout = sys.stderr = open(r"C:\cec\dpcec.log", "a", buffering=1)
 
-CAP, CTL, TX_INFO, IRQ = 0x3000, 0x3001, 0x3003, 0x3004
-LA_MASK, TX_BUF = 0x300E, 0x3020
+CAP, CTL, TX_INFO, IRQ, TX_BUF = 0x3000, 0x3001, 0x3003, 0x3004, 0x3020
 TX_SENT, LINE_ERR, ADDR_NACK, DATA_NACK, TX_ALL = 0x10, 0x20, 0x40, 0x80, 0xF0
-LA = 4
+LA = 4  # Playback Device 1
+PBT_APMSUSPEND, DEVICE_NOTIFY_CALLBACK = 0x4, 2
+
+def log(*msg):
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), *msg)
 
 def wr(p, addr, data):
     # AMD ADL rejects multi-byte native AUX writes (ADL -1), so write one byte at a time
@@ -101,31 +100,13 @@ def list_ports():
             idx = counts.get(port.kind, 0); counts[port.kind] = idx + 1
             print(f"  {port.kind} --port {idx}   {port.name}")
 
-def read_pa(p):
-    edid = b""
-    for off in (0x00, 0x80):
-        p.i2c_write(0xA0, bytes([off]))
-        edid += p.i2c_read(0xA0, 128)
-    ext = edid[128:]
-    if edid[126] < 1 or ext[0] != 0x02:
-        sys.exit("No CEA extension block in the TV's EDID")
-    i, end = 4, ext[2]
-    while i < end:
-        tag, length = ext[i] >> 5, ext[i] & 0x1F
-        if tag == 3 and ext[i+1:i+4] == b"\x03\x0c\x00":
-            pa = (ext[i+4] << 8) | ext[i+5]
-            print(f"Physical address {pa>>12}.{(pa>>8)&15}.{(pa>>4)&15}.{pa&15}  ->  use --pa {pa:04x}")
-            return
-        i += length + 1
-    sys.exit("No HDMI physical address found in EDID")
-
 def cec_enable(p):
     cap = p.read_dpcd(CAP, 1)[0]
     print(f"CEC tunneling capability: 0x{cap:02x}")
     if not cap & 0x01:
-        sys.exit("This adapter/port does not report CEC tunneling")
+        raise AuxError("this adapter/port does not report CEC tunneling")
     wr(p, CTL, b"\x01")
-    # No LA mask (0x300E): ADL refuses that write, and it's only needed to receive, not to send on/standby
+    # No LA mask (0x300E): ADL refuses that write, and it's only needed to receive
 
 def cec_send(p, msg):
     wr(p, IRQ, bytes([TX_ALL]))
@@ -145,30 +126,51 @@ def cec_send(p, msg):
     print("FAIL: timeout")
     return False
 
+def run(cmd, a):
+    with AuxPort("DP", index=a.port, gpu_index=a.gpu, backend="AMD") as p:
+        cec_enable(p)
+        if cmd == "on":
+            return cec_send(p, [(LA << 4) | 0x0, 0x04])   # Image View On
+        if cmd == "standby":
+            return cec_send(p, [(LA << 4) | 0x0, 0x36])   # Standby
+        return True                                        # probe
+
+def watch(a):
+    # Windows calls on_power before the PC sleeps (and waits ~2 s for it), unlike the
+    # Kernel-Power 42 task trigger, which only got to run after wake.
+    CB = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p)
+    class Params(ctypes.Structure):
+        _fields_ = [("callback", CB), ("context", ctypes.c_void_p)]
+    def on_power(ctx, kind, setting):
+        if kind == PBT_APMSUSPEND:
+            log("sleep -> standby")
+            try:
+                run("standby", a)
+            except Exception as e:  # never let one failure kill the watcher
+                print(f"standby failed: {e}")
+        return 0
+    cb = CB(on_power)  # keep a reference so it isn't garbage-collected
+    params, handle = Params(cb, None), ctypes.c_void_p()
+    rc = ctypes.WinDLL("powrprof").PowerRegisterSuspendResumeNotification(
+        DEVICE_NOTIFY_CALLBACK, ctypes.byref(params), ctypes.byref(handle))
+    if rc:
+        sys.exit(f"PowerRegisterSuspendResumeNotification failed: {rc}")
+    log("watching for sleep")
+    while True:
+        time.sleep(3600)
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["list", "probe", "pa", "on", "standby"])
+    ap.add_argument("cmd", choices=["list", "probe", "on", "standby", "watch"])
     ap.add_argument("--gpu", type=int, default=0)
     ap.add_argument("--port", type=int, default=0)
-    ap.add_argument("--pa")
     a = ap.parse_args()
-    print(time.strftime("%Y-%m-%d %H:%M:%S"), a.cmd)
     if a.cmd == "list":
         return list_ports()
-    ok = True
-    with AuxPort("DP", index=a.port, gpu_index=a.gpu, backend="AMD") as p:
-        if a.cmd == "pa":
-            return read_pa(p)
-        cec_enable(p)
-        if a.cmd == "on":
-            ok = cec_send(p, [(LA << 4) | 0x0, 0x04])
-            if ok and a.pa:
-                pa = int(a.pa, 16)
-                time.sleep(0.2)
-                ok = cec_send(p, [(LA << 4) | 0xF, 0x82, pa >> 8, pa & 0xFF])
-        elif a.cmd == "standby":
-            ok = cec_send(p, [(LA << 4) | 0x0, 0x36])
-    sys.exit(0 if ok else 1)
+    if a.cmd == "watch":
+        return watch(a)
+    log(a.cmd)
+    sys.exit(0 if run(a.cmd, a) else 1)
 
 if __name__ == "__main__":
     try:
@@ -179,67 +181,68 @@ if __name__ == "__main__":
 
 ---
 
-## 3. Find the port
+## 3. Find the port and check the adapter
 
 ```bat
 python C:\cec\dpcec.py list
-```
-
-Note the `--port N` number of the DisplayPort output the adapter is plugged into.
-
-## 4. Check the adapter
-
-```bat
 python C:\cec\dpcec.py probe --port 0
 ```
 
-The reported capability should be **odd** (bit 0 set), e.g. `0x01`. If it's even, that adapter/port doesn't report CEC tunneling.
+`list` shows the `--port N` number of the DisplayPort output the adapter is plugged into. `probe` should report an **odd** capability (this adapter reports `0x07`).
 
-```bat
-python C:\cec\dpcec.py pa --port 0
-```
-
-This reads the TV's HDMI physical address from the EDID and prints the value to use with `--pa` (e.g. `1000` for `1.0.0.0`).
-
-## 5. Test
+## 4. Test
 
 ```bat
 python C:\cec\dpcec.py standby --port 0
-python C:\cec\dpcec.py on --port 0 --pa 1000
+python C:\cec\dpcec.py on --port 0
 ```
 
-Replace `0` and `1000` with your values from steps 3–4.
+If the screen goes away during a test, save the output to a file so you can read it afterwards:
+
+```bat
+python C:\cec\dpcec.py standby --port 0 > C:\cec\out.txt 2>&1
+```
+
+If the TV is stuck on "no signal", unplug the adapter from the PC for about 10 seconds and plug it back in.
 
 ### Result messages
 
 | Output | Meaning |
 |---|---|
 | `OK: TV acknowledged` | Message delivered |
-| `FAIL: TV did not answer (CEC off on TV?)` | No ACK from the TV — check CEC is enabled in the TV's settings |
+| `FAIL: TV did not answer (CEC off on TV?)` | No ACK from the TV. Check CEC is enabled in the TV's settings |
 | `FAIL: TV rejected the message` | TV NACKed the data |
 | `FAIL: CEC line error` | Problem on the CEC line |
 | `FAIL: timeout` | No IRQ flag within 1 second |
-| `AUX error: ...` | The AUX access itself failed (wrong port, or gpu_aux/driver issue) |
+| `AUX error: write 0xXXXX = YY: ...` | The AUX write to that address failed |
 
 ---
 
-## 6. Automation: `C:\cec\install-tasks.bat`
+## 5. Automation: `C:\cec\install-tasks.bat`
 
-Set `PORT` and `PA` to your values, save as `C:\cec\install-tasks.bat`, and **run it as administrator**. It uses `pythonw.exe` so no console window pops up.
+Set `PORT`, save as `C:\cec\install-tasks.bat`, and **run it as administrator**. It uses `pythonw.exe`, so no console window pops up. It also removes the old "TV off at sleep" task if it exists.
 
 ```bat
 @echo off
+rem Run as administrator. Set PORT to the --port number from "dpcec.py list".
 set PORT=0
-set PA=1000
 set "PY="
 for /f "delims=" %%i in ('where pythonw') do if not defined PY set "PY=%%i"
 if not defined PY (echo pythonw.exe not found & pause & exit /b 1)
-set "ON=\"%PY%\" C:\cec\dpcec.py on --port %PORT% --pa %PA%"
+set "ON=\"%PY%\" C:\cec\dpcec.py on --port %PORT%"
 set "OFF=\"%PY%\" C:\cec\dpcec.py standby --port %PORT%"
-schtasks /Create /F /TN "CEC\TV on at logon"    /SC ONLOGON /TR "%ON%"
-schtasks /Create /F /TN "CEC\TV on at wake"     /SC ONEVENT /EC System /MO "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]" /TR "%ON%"
-schtasks /Create /F /TN "CEC\TV off at sleep"   /SC ONEVENT /EC System /MO "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=42]]" /TR "%OFF%"
+set "WATCH=\"%PY%\" C:\cec\dpcec.py watch --port %PORT%"
+
+rem Old sleep task ran at wake instead of at sleep - remove it
+schtasks /Delete /F /TN "CEC\TV off at sleep" >nul 2>&1
+
+schtasks /Create /F /TN "CEC\TV on at logon"     /SC ONLOGON /TR "%ON%"
+schtasks /Create /F /TN "CEC\TV on at wake"      /SC ONEVENT /EC System /MO "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]" /TR "%ON%"
 schtasks /Create /F /TN "CEC\TV off at shutdown" /SC ONEVENT /EC System /MO "*[System[Provider[@Name='User32'] and EventID=1074]]" /TR "%OFF%"
+schtasks /Create /F /TN "CEC\TV sleep watcher"   /SC ONLOGON /TR "%WATCH%"
+rem Scheduled tasks are killed after 3 days by default; the watcher must run forever
+powershell -NoProfile -Command "Set-ScheduledTask -TaskPath '\CEC\' -TaskName 'TV sleep watcher' -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero))"
+schtasks /Run /TN "CEC\TV sleep watcher"
 echo Done.
 pause
 ```
@@ -250,25 +253,21 @@ pause
 |---|---|---|
 | TV on at logon | User logon | `on` |
 | TV on at wake | Power-Troubleshooter, Event ID 1 (resume) | `on` |
-| TV off at sleep | Kernel-Power, Event ID 42 (entering sleep) | `standby` |
-| TV off at shutdown | User32, Event ID 1074 (shutdown/restart initiated) | `standby` |
+| TV sleep watcher | User logon, runs in the background | `standby` just before the PC sleeps |
+| TV off at shutdown | User32, Event ID 1074 (shutdown/restart initiated) | `standby` (untested: may also fire too late) |
 
 ### Logs
 
-Scheduled runs (via `pythonw`) write their output to:
-
-```
-C:\cec\dpcec.log
-```
+Scheduled runs write to `C:\cec\dpcec.log`. Each entry starts with a timestamp and the command. The watcher logs `watching for sleep` when it starts and `sleep -> standby` each time the PC goes to sleep.
 
 ---
 
 ## Status / next steps
 
-- [ ] Install Python and gpu-aux
-- [ ] `list` — find the port
-- [ ] `probe` — confirm tunneling capability is odd
-- [ ] `pa` — get the physical address
-- [ ] Test `standby` and `on` manually
-- [ ] Run `install-tasks.bat` as administrator
-- [ ] Verify logon, wake, sleep and shutdown behavior using `C:\cec\dpcec.log`
+- [x] Install Python and gpu-aux
+- [x] `list` / `probe`: capability `0x07`
+- [x] `standby` and `on` reach the TV (`OK: TV acknowledged`)
+- [ ] Run the new `install-tasks.bat` as administrator
+- [ ] Sleep: TV turns off before the PC sleeps (`sleep -> standby` in the log)
+- [ ] Wake: TV turns on
+- [ ] Shutdown: TV turns off
