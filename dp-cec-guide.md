@@ -47,6 +47,8 @@ It can also read the TV's HDMI physical address from the EDID (`pa` command).
 
 The ADL AUX interface is private and undocumented. An Adrenalin driver update could break it.
 
+On this setup ADL accepts 1-byte DPCD writes but fails multi-byte ones with `ADL error -1`, so the script writes every register one byte at a time (`wr()` helper).
+
 ---
 
 ## 1. Install
@@ -83,6 +85,11 @@ LA_MASK, TX_BUF = 0x300E, 0x3020
 TX_SENT, LINE_ERR, ADDR_NACK, DATA_NACK, TX_ALL = 0x10, 0x20, 0x40, 0x80, 0xF0
 LA = 4
 
+def wr(p, addr, data):
+    # AMD ADL rejects multi-byte native AUX writes (ADL -1), so write one byte at a time
+    for i, b in enumerate(data):
+        p.write_dpcd(addr + i, bytes([b]))
+
 def list_ports():
     for gi, gpu in enumerate(enumerate_gpus("AMD")):
         print(f"GPU {gi}: {gpu.name}")
@@ -114,20 +121,20 @@ def cec_enable(p):
     print(f"CEC tunneling capability: 0x{cap:02x}")
     if not cap & 0x01:
         sys.exit("This adapter/port does not report CEC tunneling")
-    p.write_dpcd(CTL, b"\x01")
+    wr(p, CTL, b"\x01")
     m = 1 << LA
-    p.write_dpcd(LA_MASK, bytes([m & 0xFF, m >> 8]))
+    wr(p, LA_MASK, bytes([m & 0xFF, m >> 8]))
 
 def cec_send(p, msg):
-    p.write_dpcd(IRQ, bytes([TX_ALL]))
-    p.write_dpcd(TX_BUF, bytes(msg))
-    p.write_dpcd(TX_INFO, bytes([(len(msg) - 1) | (2 << 4) | 0x80]))
+    wr(p, IRQ, bytes([TX_ALL]))
+    wr(p, TX_BUF, bytes(msg))
+    wr(p, TX_INFO, bytes([(len(msg) - 1) | (2 << 4) | 0x80]))
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline:
         time.sleep(0.01)
         irq = p.read_dpcd(IRQ, 1)[0] & TX_ALL
         if irq:
-            p.write_dpcd(IRQ, bytes([irq]))
+            wr(p, IRQ, bytes([irq]))
             if irq & TX_SENT:   print("OK: TV acknowledged"); return True
             if irq & ADDR_NACK: print("FAIL: TV did not answer (CEC off on TV?)")
             if irq & DATA_NACK: print("FAIL: TV rejected the message")
