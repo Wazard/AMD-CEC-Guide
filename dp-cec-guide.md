@@ -28,7 +28,7 @@ Turn the TV on at logon/wake and put it in standby at sleep/shutdown, from a Win
 
 1. Checks the tunneling capability register (`0x3000`).
 2. Enables CEC tunneling (`0x3001`).
-3. Sets the logical address mask (`0x300E`) to Playback Device 1 (logical address 4).
+3. Sends as Playback Device 1 (logical address 4). The logical address mask (`0x300E`) is not set, see Caveat.
 4. Writes the CEC frame to the TX buffer (`0x3020`).
 5. Triggers transmission via `0x3003`.
 6. Polls the IRQ flags (`0x3004`) for success or error.
@@ -47,7 +47,7 @@ It can also read the TV's HDMI physical address from the EDID (`pa` command).
 
 The ADL AUX interface is private and undocumented. An Adrenalin driver update could break it.
 
-On this setup ADL accepts 1-byte DPCD writes but fails multi-byte ones with `ADL error -1`, so the script writes every register one byte at a time (`wr()` helper).
+On this setup ADL accepts 1-byte DPCD writes but fails multi-byte ones with `ADL error -1`, so the script writes every register one byte at a time (`wr()` helper). Writing the logical-address mask (`0x300E`/`0x300F`) also fails with `ADL error -1`, so the script doesn't set it. It's only needed to receive messages *from* the TV, not to send on/standby.
 
 ---
 
@@ -88,7 +88,10 @@ LA = 4
 def wr(p, addr, data):
     # AMD ADL rejects multi-byte native AUX writes (ADL -1), so write one byte at a time
     for i, b in enumerate(data):
-        p.write_dpcd(addr + i, bytes([b]))
+        try:
+            p.write_dpcd(addr + i, bytes([b]))
+        except AuxError as e:
+            raise AuxError(f"write 0x{addr + i:04X} = {b:02X}: {e}")
 
 def list_ports():
     for gi, gpu in enumerate(enumerate_gpus("AMD")):
@@ -122,8 +125,7 @@ def cec_enable(p):
     if not cap & 0x01:
         sys.exit("This adapter/port does not report CEC tunneling")
     wr(p, CTL, b"\x01")
-    m = 1 << LA
-    wr(p, LA_MASK, bytes([m & 0xFF, m >> 8]))
+    # No LA mask (0x300E): ADL refuses that write, and it's only needed to receive, not to send on/standby
 
 def cec_send(p, msg):
     wr(p, IRQ, bytes([TX_ALL]))

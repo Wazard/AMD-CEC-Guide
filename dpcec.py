@@ -14,7 +14,10 @@ LA = 4
 def wr(p, addr, data):
     # AMD ADL rejects multi-byte native AUX writes (ADL -1), so write one byte at a time
     for i, b in enumerate(data):
-        p.write_dpcd(addr + i, bytes([b]))
+        try:
+            p.write_dpcd(addr + i, bytes([b]))
+        except AuxError as e:
+            raise AuxError(f"write 0x{addr + i:04X} = {b:02X}: {e}")
 
 def list_ports():
     for gi, gpu in enumerate(enumerate_gpus("AMD")):
@@ -48,8 +51,7 @@ def cec_enable(p):
     if not cap & 0x01:
         sys.exit("This adapter/port does not report CEC tunneling")
     wr(p, CTL, b"\x01")
-    m = 1 << LA
-    wr(p, LA_MASK, bytes([m & 0xFF, m >> 8]))
+    # No LA mask (0x300E): ADL refuses that write, and it's only needed to receive, not to send on/standby
 
 def cec_send(p, msg):
     wr(p, IRQ, bytes([TX_ALL]))
